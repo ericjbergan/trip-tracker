@@ -163,7 +163,7 @@ router.get('/route-state', async (req: Request, res: Response) => {
 router.put('/route-state', async (req: Request, res: Response) => {
   try {
     console.log('Updating route state:', req.body);
-    const { routeStep, startLocation } = req.body;
+    const { routeStep, startLocation, color } = req.body;
     
     let state = await RouteState.findOne();
     
@@ -171,18 +171,25 @@ router.put('/route-state', async (req: Request, res: Response) => {
       console.log('No route state found, creating new state');
       state = await RouteState.create({
         routeStep,
-        startLocation
+        startLocation,
+        color
       });
     } else {
       console.log('Updating existing route state');
       state.routeStep = routeStep;
-      state.startLocation = startLocation;
+      if (startLocation !== undefined) {
+        state.startLocation = startLocation;
+      }
+      if (color !== undefined) {
+        state.color = color;
+      }
       await state.save();
     }
     
     console.log('Route state updated:', {
       routeStep: state.routeStep,
-      hasStartLocation: !!state.startLocation
+      hasStartLocation: !!state.startLocation,
+      color: state.color
     });
     
     res.json(state);

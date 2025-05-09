@@ -29,10 +29,29 @@ const findIndex = <T extends { _id: string }>(item: T, array: T[]): number => {
   return array.findIndex(element => element._id === item._id);
 };
 
+interface RoutePoints {
+  start: google.maps.LatLngLiteral | null;
+  end: google.maps.LatLngLiteral | null;
+  waypoints: google.maps.LatLngLiteral[];
+}
+
+interface Route {
+  start: google.maps.LatLngLiteral;
+  end: google.maps.LatLngLiteral;
+  waypoints: google.maps.LatLngLiteral[];
+  overviewPath: google.maps.LatLngLiteral[];
+  distance: string;
+  duration: string;
+  color: string;
+}
+
 const Map: React.FC<MapProps> = ({ 
   initialCenter = { lat: 40.0964, lng: -82.2618 },
   initialZoom = 12
 }) => {
+  // Add a key state for forcing re-renders
+  const [renderKey, setRenderKey] = useState(0);
+
   // Map state
   const [mapCenter, setMapCenter] = useState<google.maps.LatLngLiteral>(() => {
     const savedCenter = localStorage.getItem('mapCenter');
@@ -47,6 +66,19 @@ const Map: React.FC<MapProps> = ({
     return initialCenter;
   });
 
+  const [mapZoom, setMapZoom] = useState<number>(() => {
+    const savedZoom = localStorage.getItem('mapZoom');
+    if (savedZoom) {
+      try {
+        return parseInt(savedZoom, 10);
+      } catch (e) {
+        console.error('Error parsing saved zoom:', e);
+        return initialZoom;
+      }
+    }
+    return initialZoom;
+  });
+
   // Route state
   const [savedRoutes, setSavedRoutes] = useState<SavedRoute[]>([]);
   const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null);
@@ -58,11 +90,9 @@ const Map: React.FC<MapProps> = ({
   const [showColorPalette, setShowColorPalette] = useState(false);
   const [routeUpdateTrigger, setRouteUpdateTrigger] = useState(0);
   const [lastColorChange, setLastColorChange] = useState<number>(0);
-  const [routePoints, setRoutePoints] = useState<{
-    start: google.maps.LatLngLiteral | null;
-    waypoints: google.maps.LatLngLiteral[];
-  }>({
+  const [routePoints, setRoutePoints] = useState<RoutePoints>({
     start: null,
+    end: null,
     waypoints: []
   });
 
@@ -118,26 +148,33 @@ const Map: React.FC<MapProps> = ({
     }
   }, [hasInitializedLocation]);
 
-  // Handle map center changes from panning/zooming
+  // Handle map center and zoom changes
   const handleMapCenterChanged = () => {
     if (mapRef.current) {
       const center = mapRef.current.getCenter();
-      if (center) {
+      const zoom = mapRef.current.getZoom();
+      
+      if (center && zoom) {
         const newCenter = {
           lat: center.lat(),
           lng: center.lng()
         };
 
-        // Only update if the center has actually changed
-        if (mapCenter.lat !== newCenter.lat || mapCenter.lng !== newCenter.lng) {
+        // Only update if the center or zoom has actually changed
+        if (mapCenter.lat !== newCenter.lat || 
+            mapCenter.lng !== newCenter.lng || 
+            mapZoom !== zoom) {
           // Clear any existing timer
           if (centerUpdateTimer.current) {
             clearTimeout(centerUpdateTimer.current);
           }
 
-          // Set a new timer to update the center
+          // Set a new timer to update the state
           centerUpdateTimer.current = setTimeout(() => {
             setMapCenter(newCenter);
+            setMapZoom(zoom);
+            localStorage.setItem('mapCenter', JSON.stringify(newCenter));
+            localStorage.setItem('mapZoom', zoom.toString());
           }, 100); // 100ms debounce
         }
       }
@@ -231,29 +268,78 @@ const Map: React.FC<MapProps> = ({
     }
   }, [directions]);
 
-  const handleMapClick = (e: google.maps.MapMouseEvent) => {
-    if (!e.latLng) {
-      setShowDeleteButton(false);
-      setSelectedRoute(null);
-      setShowColorPalette(false);
-      return;
-    }
-    
-    if (isAddingPin) {
-      const newMarker = {
-        _id: Date.now().toString(),
-        position: {
-          lat: e.latLng.lat(),
-          lng: e.latLng.lng()
+  const handleMapClick = async (e: google.maps.MapMouseEvent) => {
+    if (!isAddingRoute || !e.latLng) return;
+
+    const latLngLiteral = {
+      lat: e.latLng.lat(),
+      lng: e.latLng.lng()
+    };
+
+    if (!routePoints.start) {
+      setRoutePoints({ ...routePoints, start: latLngLiteral, end: null });
+      setShowColorPalette(true);
+    } else if (!routePoints.end) {
+      // Get the current route state including the saved color
+      const state = await fetchRouteState();
+      if (!state) {
+        console.error('Failed to fetch route state');
+        return;
+      }
+
+      // Use the saved color from the route state
+      const routeColor = state.color || selectedColor;
+      console.log('Using route color:', routeColor);
+
+      setRoutePoints({ ...routePoints, end: latLngLiteral });
+      try {
+        const result = await directionsService.current?.route({
+          origin: routePoints.start,
+          destination: latLngLiteral,
+          travelMode: google.maps.TravelMode.DRIVING,
+        });
+
+        if (result?.routes?.[0]) {
+          const newRoute: Route = {
+            start: routePoints.start,
+            end: latLngLiteral,
+            waypoints: [],
+            overviewPath: result.routes[0].overview_path.map((point: google.maps.LatLng) => ({
+              lat: point.lat(),
+              lng: point.lng(),
+            })),
+            distance: result.routes[0].legs[0].distance?.text || '',
+            duration: result.routes[0].legs[0].duration?.text || '',
+            color: routeColor // Use the color from route state
+          };
+
+          try {
+            console.log('Saving route with color:', newRoute.color);
+            const response = await mapApi.saveRoute(newRoute);
+            
+            if (response.data) {
+              console.log('Route saved with color:', response.data.color);
+              setSavedRoutes([...savedRoutes, response.data]);
+              setRouteSuccess('Route saved successfully!');
+              setTimeout(() => setRouteSuccess(null), 3000);
+            } else {
+              throw new Error('Failed to save route');
+            }
+          } catch (error) {
+            console.error('Error saving route:', error);
+            setRouteError('Failed to save route. Please try again.');
+            setTimeout(() => setRouteError(null), 3000);
+          }
         }
-      };
-      setMarkers(prev => [...prev, newMarker]);
-      setIsAddingPin(false);
+      } catch (error) {
+        console.error('Error calculating route:', error);
+        setRouteError('Failed to calculate route. Please try again.');
+        setTimeout(() => setRouteError(null), 3000);
+      }
+      setRoutePoints({ start: null, end: null, waypoints: [] });
+      setIsAddingRoute(false);
+      setShowColorPalette(false);
     }
-    
-    setShowDeleteButton(false);
-    setSelectedRoute(null);
-    setShowColorPalette(false);
   };
 
   const toggleRecording = () => {
@@ -277,14 +363,17 @@ const Map: React.FC<MapProps> = ({
   }, []);
 
   // Add function to update route state
-  const updateRouteState = useCallback(async (routeStep: 'start' | 'waypoint' | 'end', startLocation: google.maps.LatLngLiteral | null) => {
+  const updateRouteState = useCallback(async (routeStep: 'start' | 'waypoint' | 'end' | 'color', data: google.maps.LatLngLiteral | string | null) => {
     try {
       const response = await fetch('http://localhost:3000/api/map/route-state', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ routeStep, startLocation }),
+        body: JSON.stringify({ 
+          routeStep, 
+          ...(typeof data === 'string' ? { color: data } : { startLocation: data })
+        }),
       });
       if (!response.ok) throw new Error('Failed to update route state');
       return await response.json();
@@ -294,296 +383,23 @@ const Map: React.FC<MapProps> = ({
     }
   }, []);
 
-  // Modify startNewRoute to use MongoDB state
-  const startNewRoute = async () => {
-    if (isAddingRoute) {
-      // Cancel route creation
-      console.log('Canceling route creation, resetting all route state');
-      setIsAddingRoute(false);
-      setDirections(null);
-      setSearchQuery('');
-      setRouteError(null);
-      setRouteSuccess(null);
-      await updateRouteState('waypoint', null);
-    } else {
-      // Start new route
-      console.log('Starting new route, initializing route state');
-      setIsAddingRoute(true);
-      await updateRouteState('start', null);
-      setDirections(null);
-      setRouteError(null);
-      setRouteSuccess(null);
-      setSearchQuery('');
-      
-      // Focus the search input after a short delay to ensure it's mounted
-      setTimeout(() => {
-        if (searchInputRef.current) {
-          searchInputRef.current.focus();
-        }
-      }, 100);
-    }
-  };
-
-  // Modify handlePlaceSelection to update local state for UI
-  const handlePlaceSelection = async (place: google.maps.places.PlaceResult) => {
-    if (!place.geometry?.location) {
-      console.error('No location found for selected place');
-      return;
-    }
-
-    const location = {
-      lat: place.geometry.location.lat(),
-      lng: place.geometry.location.lng()
-    };
-
-    console.log('Selected place:', {
-      name: place.name,
-      location
-    });
-
-    // Get current route state
-    const state = await fetchRouteState();
-    if (!state) {
-      console.error('Failed to fetch route state');
-      return;
-    }
-
-    if (state.routeStep === 'start') {
-      console.log('Setting start location');
-      await updateRouteState('waypoint', location);
-      // Update local state for UI
-      setRoutePoints(prev => ({
-        ...prev,
-        start: location
-      }));
-      setMapCenter(location);
-    } else if (state.routeStep === 'waypoint') {
-      console.log('Adding waypoint');
-      // Add waypoint logic here
-      setRoutePoints(prev => ({
-        ...prev,
-        waypoints: [...prev.waypoints, location]
-      }));
-    }
-
-    setSearchQuery('');
-    
-    // Update map center state and stop following location
-    setMapCenter(location);
-    setIsFollowingLocation(false);
-    
-    // Center map on selected location
-    if (mapRef.current) {
-      mapRef.current.panTo(location);
-      mapRef.current.setZoom(14);
-    }
-  };
-
-  const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && autocompleteRef.current) {
-      const place = autocompleteRef.current.getPlace();
-      if (place && place.geometry && place.geometry.location) {
-        handlePlaceSelection(place);
-      }
-    }
-  };
-
-  const onPlaceSelected = () => {
-    if (!autocompleteRef.current) {
-      console.error('Autocomplete reference is not available');
-      return;
-    }
-
-    const place = autocompleteRef.current.getPlace();
-    if (place && place.geometry && place.geometry.location) {
-      handlePlaceSelection(place);
-    }
-  };
-
-  const handleMarkerClick = (marker: SavedMarker) => {
-    setSelectedMarker(marker);
-    setSelectedRoute(null);
-  };
-
-  const handleRouteClick = (route: SavedRoute, index: number) => {
-    console.log('Route clicked:', route, 'at index:', index);
-    setSelectedRoute(route);
-    setShowColorPalette(true);
-    setShowDeleteButton(true);
-  };
-
-  const handleDeleteClick = (type: 'marker' | 'route', id: string | undefined) => {
-    if (!id) {
-      console.error('No ID provided for deletion');
-      return;
-    }
-    setItemToDelete({ type, id });
-    setShowDeleteConfirm(true);
-  };
-
-  const confirmDelete = () => {
-    if (!itemToDelete) return;
-
-    if (itemToDelete.type === 'marker') {
-      const updatedMarkers = markers.filter(marker => marker._id !== itemToDelete.id);
-      setMarkers(updatedMarkers);
-      deleteMarker(itemToDelete.id);
-    } else if (itemToDelete.type === 'route') {
-      const updatedRoutes = savedRoutes.filter(route => route._id !== itemToDelete.id);
-      setSavedRoutes(updatedRoutes);
-      deleteRoute(itemToDelete.id);
-      
-      if (selectedRoute && selectedRoute._id === itemToDelete.id) {
-        setDirections(null);
-      }
-    }
-
-    setShowDeleteConfirm(false);
-    setItemToDelete(null);
-    setSelectedMarker(null);
-    setSelectedRoute(null);
-    setShowDeleteButton(false);
-  };
-
-  const cancelDelete = () => {
-    console.log('Canceling deletion');
-    setShowDeleteConfirm(false);
-    setItemToDelete(null);
-  };
-
-  const handleColorChange = (color: string) => {
-    if (!selectedRoute) {
-      console.log('No route selected');
-      return;
-    }
-
-    console.log('Changing route color:', {
-      from: selectedRoute.color,
-      to: color,
-      routeStart: selectedRoute.start,
-      routeEnd: selectedRoute.end
-    });
-    
-    // Find the exact route in savedRoutes
-    const routeIndex = savedRoutes.findIndex(route => 
-      route.start.lat === selectedRoute.start.lat &&
-      route.start.lng === selectedRoute.start.lng &&
-      route.end.lat === selectedRoute.end.lat &&
-      route.end.lng === selectedRoute.end.lng
-    );
-
-    if (routeIndex === -1) {
-      console.error('Could not find route to update');
-      return;
-    }
-
-    // Create a new array without the route
-    const routesWithoutTarget = savedRoutes.filter((_, i) => i !== routeIndex);
-    
-    // Create the updated route with new color
-    const updatedRoute = {
-      ...savedRoutes[routeIndex],
-      color: color
-    };
-
-    // First remove the route
-    setSavedRoutes(routesWithoutTarget);
-    
-    // Then add it back with the new color
-    setTimeout(() => {
-      const newRoutes = [...routesWithoutTarget];
-      newRoutes.splice(routeIndex, 0, updatedRoute);
-      setSavedRoutes(newRoutes);
-      console.log('Route color updated:', {
-        index: routeIndex,
-        newColor: color,
-        totalRoutes: newRoutes.length,
-        uniqueColors: [...new Set(newRoutes.map(r => r.color))]
-      });
-    }, 50);
-    
-    // Clear the selected route and directions
-    setSelectedRoute(null);
-    setDirections(null);
-    
-    // Hide color palette
-    setShowColorPalette(false);
-  };
-
-  const handleRouteSelect = (route: SavedRoute) => {
-    if (!route._id) {
-      console.error('Route missing _id:', route);
-      return;
-    }
-    setSelectedRoute(route);
-    setDirections(null);
-    setRoutePoints({
-      start: route.start,
-      waypoints: route.waypoints
-    });
-    setPath(route.overviewPath);
-    setShowDeleteButton(true);
-  };
-
-  const handleRouteColorChange = async (color: string) => {
-    if (!selectedRoute || !selectedRoute._id) {
-      console.error('Selected route missing _id:', selectedRoute);
-      return;
-    }
-
-    try {
-      console.log('Changing route color:', {
-        routeId: selectedRoute._id,
-        from: selectedRoute.color,
-        to: color
-      });
-
-      const updatedRoute: SavedRoute = {
-        ...selectedRoute,
-        color
-      };
-
-      // Update local state immediately for better UX
-      setSavedRoutes(prev => prev.map(route => 
-        route._id === selectedRoute._id ? updatedRoute : route
-      ));
-      setSelectedRoute(updatedRoute);
-
-      // Then update in backend
-      const response = await mapApi.updateRoute(selectedRoute._id, updatedRoute);
-      
-      // Update with the response from the server to ensure consistency
-      if (response.data) {
-        setSavedRoutes(prev => prev.map(route => 
-          route._id === selectedRoute._id ? response.data : route
-        ));
-        setSelectedRoute(response.data);
-      }
-      
-      // Hide color palette
-      setShowColorPalette(false);
-    } catch (error) {
-      console.error('Error updating route color:', error);
-      setRouteError('Failed to update route color');
-      
-      // Revert local state on error
-      setSavedRoutes(prev => prev.map(route => 
-        route._id === selectedRoute._id ? selectedRoute : route
-      ));
-      setSelectedRoute(selectedRoute);
-    }
-  };
-
   // Load routes and markers from API
   useEffect(() => {
     const loadData = async () => {
       try {
+        console.log('Fetching fresh data from database...');
         const [routesResponse, markersResponse] = await Promise.all([
           mapApi.getRoutes(),
           mapApi.getMarkers()
         ]);
         
-        setSavedRoutes(routesResponse.data);
+        // Ensure routes have their colors preserved
+        const routesWithColors = routesResponse.data.map((route: any) => ({
+          ...route,
+          color: route.color || '#0000FF' // Default to blue if no color is set
+        }));
+        
+        setSavedRoutes(routesWithColors);
         setMarkers(markersResponse.data.map((m: any) => ({
           _id: m._id,
           position: m.position
@@ -594,7 +410,7 @@ const Map: React.FC<MapProps> = ({
     };
 
     loadData();
-  }, []);
+  }, [renderKey]);
 
   // Remove duplicate route handling functions and consolidate into a single approach
   const saveRoute = async (route: SavedRoute) => {
@@ -733,6 +549,9 @@ const Map: React.FC<MapProps> = ({
 
       setDirections(result);
 
+      // Use the color from route state or fallback to selected color
+      const routeColor = state.color || selectedColor;
+
       const routeData = {
         start: state.startLocation,
         end: lastWaypoint,
@@ -743,7 +562,7 @@ const Map: React.FC<MapProps> = ({
         })),
         distance: result.routes[0].legs[0].distance?.text || '',
         duration: result.routes[0].legs[0].duration?.text || '',
-        color: '#0000FF'
+        color: routeColor // Use the color from route state
       };
 
       try {
@@ -755,6 +574,7 @@ const Map: React.FC<MapProps> = ({
         setIsAddingRoute(false);
         setRoutePoints({
           start: null,
+          end: null,
           waypoints: []
         });
         await updateRouteState('waypoint', null);
@@ -780,11 +600,301 @@ const Map: React.FC<MapProps> = ({
     updateStep();
   }, [getCurrentRouteStep]);
 
+  // Update handleColorSelect to be more explicit
+  const handleColorSelect = async (color: string) => {
+    console.log('Color selected:', color);
+    setSelectedColor(color);
+    
+    // Save the selected color to MongoDB
+    try {
+      const response = await updateRouteState('color', color);
+      console.log('Color saved to route state:', response);
+      
+      // Update local state
+      setShowColorPalette(false);
+      
+      // If we have a selected route, update its color
+      if (selectedRoute) {
+        await handleRouteColorChange(color);
+      }
+    } catch (error) {
+      console.error('Error saving color:', error);
+      setRouteError('Failed to save color selection');
+      setTimeout(() => setRouteError(null), 3000);
+    }
+  };
+
+  // Update the handleAddWaypoint function
+  const handleAddWaypoint = (e: google.maps.MapMouseEvent) => {
+    if (!e.latLng || !selectedRoute) return;
+    
+    const newWaypoint = {
+      lat: e.latLng.lat(),
+      lng: e.latLng.lng()
+    };
+    
+    setRoutePoints(prev => ({
+      start: prev.start,
+      end: prev.end,
+      waypoints: [...prev.waypoints, newWaypoint]
+    }));
+  };
+
+  // Update the button click handlers
+  const handleAddPin = async () => {
+    setIsAddingPin(!isAddingPin);
+    setRenderKey(prev => prev + 1); // Force re-render and data refetch
+  };
+
+  const handleStartNewRoute = async () => {
+    if (isAddingRoute) {
+      // Cancel route creation
+      console.log('Canceling route creation, resetting all route state');
+      setIsAddingRoute(false);
+      setDirections(null);
+      setSearchQuery('');
+      setRouteError(null);
+      setRouteSuccess(null);
+      setShowColorPalette(false);
+      await updateRouteState('waypoint', null);
+    } else {
+      // Start new route
+      console.log('Starting new route, initializing route state');
+      setIsAddingRoute(true);
+      setShowColorPalette(true);
+      
+      // Fetch current route state to get saved color
+      const state = await fetchRouteState();
+      if (state?.color) {
+        setSelectedColor(state.color);
+      }
+      
+      await updateRouteState('start', null);
+      setDirections(null);
+      setRouteError(null);
+      setRouteSuccess(null);
+      setSearchQuery('');
+      
+      // Focus the search input after a short delay to ensure it's mounted
+      setTimeout(() => {
+        if (searchInputRef.current) {
+          searchInputRef.current.focus();
+        }
+      }, 100);
+    }
+    setRenderKey(prev => prev + 1); // Force re-render and data refetch
+  };
+
+  // Add back the missing functions
+  const handleRouteColorChange = async (color: string) => {
+    if (!selectedRoute) {
+      console.error('No route selected for color change');
+      return;
+    }
+
+    try {
+      console.log('Changing route color:', {
+        routeId: selectedRoute._id,
+        from: selectedRoute.color,
+        to: color
+      });
+
+      // Update local state immediately for better UX
+      const updatedRoute = {
+        ...selectedRoute,
+        color
+      };
+      setSavedRoutes(prev => prev.map(route => 
+        route._id === selectedRoute._id ? updatedRoute : route
+      ));
+      setSelectedRoute(updatedRoute);
+
+      // Then update in backend
+      const response = await fetch(`http://localhost:3000/api/map/routes/${selectedRoute._id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ color })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to update route color');
+      }
+
+      const updatedRouteData = await response.json();
+      
+      // Update with the response from the server to ensure consistency
+      setSavedRoutes(prev => prev.map(route => 
+        route._id === selectedRoute._id ? updatedRouteData : route
+      ));
+      setSelectedRoute(updatedRouteData);
+      
+      // Hide color palette
+      setShowColorPalette(false);
+    } catch (error) {
+      console.error('Error updating route color:', error);
+      setRouteError('Failed to update route color');
+      
+      // Revert local state on error
+      setSavedRoutes(prev => prev.map(route => 
+        route._id === selectedRoute._id ? selectedRoute : route
+      ));
+      setSelectedRoute(selectedRoute);
+    }
+  };
+
+  // Add back the handlePlaceSelection function
+  const handlePlaceSelection = async (place: google.maps.places.PlaceResult) => {
+    if (!place.geometry?.location) {
+      console.error('No location found for selected place');
+      return;
+    }
+
+    const location = {
+      lat: place.geometry.location.lat(),
+      lng: place.geometry.location.lng()
+    };
+
+    console.log('Selected place:', {
+      name: place.name,
+      location
+    });
+
+    if (isAddingPin) {
+      try {
+        const response = await mapApi.saveMarker({ position: location });
+        setMarkers(prev => [...prev, response.data]);
+        setRouteSuccess('Marker added successfully!');
+        setTimeout(() => setRouteSuccess(null), 3000);
+        setIsAddingPin(false);
+        setSearchQuery(''); // Clear search field
+      } catch (error) {
+        console.error('Error saving marker:', error);
+        setRouteError('Failed to save marker. Please try again.');
+        setTimeout(() => setRouteError(null), 3000);
+      }
+    } else {
+      // Get current route state
+      const state = await fetchRouteState();
+      if (!state) {
+        console.error('Failed to fetch route state');
+        return;
+      }
+
+      if (!state.startLocation) {
+        console.log('Setting start location');
+        setRoutePoints(prev => ({
+          ...prev,
+          start: location,
+          end: null
+        }));
+        await updateRouteState('start', location);
+        setSearchQuery(''); // Clear search field
+      } else {
+        console.log('Setting end location');
+        setRoutePoints(prev => ({
+          ...prev,
+          end: location,
+          waypoints: [...prev.waypoints, location]
+        }));
+        setSearchQuery(''); // Clear search field
+        
+        // Show the finish route button
+        if (state.startLocation && location) {
+          try {
+            const result = await directionsService.current?.route({
+              origin: state.startLocation,
+              destination: location,
+              travelMode: google.maps.TravelMode.DRIVING,
+            });
+
+            if (result?.routes?.[0]) {
+              setDirections(result);
+            }
+          } catch (error) {
+            console.error('Error calculating route:', error);
+            setRouteError('Failed to calculate route. Please try again.');
+            setTimeout(() => setRouteError(null), 3000);
+          }
+        }
+      }
+    }
+
+    // Update map center state and stop following location
+    setMapCenter(location);
+    setIsFollowingLocation(false);
+    
+    // Center map on selected location
+    if (mapRef.current) {
+      mapRef.current.panTo(location);
+      mapRef.current.setZoom(14);
+    }
+  };
+
+  const handleMarkerClick = (marker: SavedMarker) => {
+    setSelectedMarker(marker);
+    setSelectedRoute(null);
+  };
+
+  const handleRouteClick = (route: SavedRoute, index: number) => {
+    console.log('Route clicked:', route, 'at index:', index);
+    setSelectedRoute(route);
+    setShowColorPalette(true);
+    setShowDeleteButton(true);
+  };
+
+  const handleDeleteClick = (type: 'marker' | 'route', id: string | undefined) => {
+    if (!id) {
+      console.error('No ID provided for deletion');
+      return;
+    }
+    setItemToDelete({ type, id });
+    setShowDeleteConfirm(true);
+  };
+
+  const confirmDelete = () => {
+    if (!itemToDelete) return;
+
+    if (itemToDelete.type === 'marker') {
+      const updatedMarkers = markers.filter(marker => marker._id !== itemToDelete.id);
+      setMarkers(updatedMarkers);
+      deleteMarker(itemToDelete.id);
+    } else if (itemToDelete.type === 'route') {
+      const updatedRoutes = savedRoutes.filter(route => route._id !== itemToDelete.id);
+      setSavedRoutes(updatedRoutes);
+      deleteRoute(itemToDelete.id);
+      
+      if (selectedRoute && selectedRoute._id === itemToDelete.id) {
+        setDirections(null);
+      }
+    }
+
+    setShowDeleteConfirm(false);
+    setItemToDelete(null);
+    setSelectedMarker(null);
+    setSelectedRoute(null);
+    setShowDeleteButton(false);
+  };
+
+  // Add back the onPlaceSelected function
+  const onPlaceSelected = () => {
+    if (!autocompleteRef.current) {
+      console.error('Autocomplete reference is not available');
+      return;
+    }
+
+    const place = autocompleteRef.current.getPlace();
+    if (place && place.geometry && place.geometry.location) {
+      handlePlaceSelection(place);
+    }
+  };
+
   if (loadError) return <div>Error loading maps</div>;
   if (!isLoaded) return <div>Loading maps...</div>;
 
   return (
-    <div className="relative w-full h-full">
+    <div className="relative w-full h-full" key={renderKey}>
       {/* Search Input */}
       {(isAddingRoute || isAddingPin) && (
         <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-20 bg-white p-4 rounded-lg shadow-lg w-96">
@@ -809,7 +919,6 @@ const Map: React.FC<MapProps> = ({
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyPress={handleKeyPress}
               />
             </Autocomplete>
             {routeError && (
@@ -821,7 +930,7 @@ const Map: React.FC<MapProps> = ({
             {isAddingRoute && (
               <div className="flex justify-between mt-2">
                 <button
-                  onClick={startNewRoute}
+                  onClick={handleStartNewRoute}
                   className="px-3 py-1.5 bg-red-500 text-white rounded hover:bg-red-600 text-sm"
                 >
                   Cancel Route
@@ -843,12 +952,13 @@ const Map: React.FC<MapProps> = ({
       <GoogleMap
         mapContainerClassName="w-full h-full"
         center={mapCenter}
-        zoom={initialZoom}
+        zoom={mapZoom}
         onClick={handleMapClick}
         onLoad={map => {
           mapRef.current = map;
         }}
         onCenterChanged={handleMapCenterChanged}
+        onZoomChanged={handleMapCenterChanged}
         options={{
           streetViewControl: false,
           mapTypeControl: false,
@@ -1042,6 +1152,27 @@ const Map: React.FC<MapProps> = ({
             </div>
           </OverlayView>
         )}
+
+        {isAddingRoute && showColorPalette && (
+          <div className="absolute top-4 right-4 bg-white p-4 rounded-lg shadow-lg z-10">
+            <div className="flex flex-col space-y-2">
+              <span className="text-sm font-medium text-gray-700">Select Route Color</span>
+              <div className="grid grid-cols-5 gap-2">
+                {ROUTE_COLORS.map((color) => (
+                  <button
+                    key={color.value}
+                    onClick={() => handleColorSelect(color.value)}
+                    className={`w-8 h-8 rounded-full border-2 transition-all ${
+                      selectedColor === color.value ? 'border-black scale-110' : 'border-gray-300'
+                    }`}
+                    style={{ backgroundColor: color.value }}
+                    title={color.name}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
       </GoogleMap>
 
       {/* Delete confirmation dialog */}
@@ -1092,7 +1223,7 @@ const Map: React.FC<MapProps> = ({
           </button>
           
           <button
-            onClick={() => setIsAddingPin(!isAddingPin)}
+            onClick={handleAddPin}
             className={`px-3 py-1.5 rounded-lg font-semibold ${
               isAddingPin ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'
             } text-white text-sm`}
@@ -1101,7 +1232,7 @@ const Map: React.FC<MapProps> = ({
           </button>
           
           <button
-            onClick={startNewRoute}
+            onClick={handleStartNewRoute}
             className={`px-3 py-1.5 rounded-lg font-semibold ${
               isAddingRoute ? 'bg-red-500 hover:bg-red-600' : 'bg-yellow-500 hover:bg-yellow-600'
             } text-white text-sm`}

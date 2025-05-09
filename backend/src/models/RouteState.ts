@@ -1,23 +1,28 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface IRouteState extends Document {
-  routeStep: 'start' | 'waypoint' | 'end';
+  routeStep: 'start' | 'waypoint' | 'end' | 'color';
   startLocation: {
     lat: number;
     lng: number;
   } | null;
+  color: string | null;
   updatedAt: Date;
 }
 
 const RouteStateSchema: Schema = new Schema({
   routeStep: {
     type: String,
-    enum: ['start', 'waypoint', 'end'],
+    enum: ['start', 'waypoint', 'end', 'color'],
     required: true
   },
   startLocation: {
     lat: { type: Number },
     lng: { type: Number }
+  },
+  color: {
+    type: String,
+    default: null
   }
 }, {
   timestamps: true
