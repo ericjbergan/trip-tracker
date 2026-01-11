@@ -5,6 +5,7 @@ export interface IMarker extends Document {
     lat: number;
     lng: number;
   };
+  name?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -13,7 +14,8 @@ const MarkerSchema: Schema = new Schema({
   position: {
     lat: { type: Number, required: true },
     lng: { type: Number, required: true }
-  }
+  },
+  name: { type: String }
 }, {
   timestamps: true
 });

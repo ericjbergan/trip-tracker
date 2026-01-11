@@ -12,4 +12,5 @@ export interface SavedRoute {
 export interface SavedMarker {
   _id: string;
   position: google.maps.LatLngLiteral;
+  name?: string;
 } 

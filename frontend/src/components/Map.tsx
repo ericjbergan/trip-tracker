@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { GoogleMap, useLoadScript, Marker, Polyline, Autocomplete, DirectionsRenderer, OverlayView } from '@react-google-maps/api';
+import { GoogleMap, useLoadScript, Polyline, Autocomplete, DirectionsRenderer, OverlayView } from '@react-google-maps/api';
 import { getRoutes, saveRoute, deleteRoute, updateRoute, getMarkers, saveMarker, deleteMarker, exportData } from '../utils/storage';
 import { SavedRoute, SavedMarker } from '../types/map';
 import { mapApi } from '../services/api';
 
-const libraries: ("places" | "drawing" | "geometry" | "visualization")[] = ['places', 'geometry'];
+const libraries: ("places" | "drawing" | "geometry" | "visualization" | "marker")[] = ['places', 'geometry', 'marker'];
 
 interface MapProps {
   initialCenter?: google.maps.LatLngLiteral;
@@ -29,11 +29,104 @@ const findIndex = <T extends { _id: string }>(item: T, array: T[]): number => {
   return array.findIndex(element => element._id === item._id);
 };
 
+// Helper function to extract full path from DirectionsResult (handles waypoints correctly)
+const extractFullPath = (directionsResult: google.maps.DirectionsResult): google.maps.LatLngLiteral[] => {
+  const allPathPoints: google.maps.LatLngLiteral[] = [];
+  directionsResult.routes[0].legs.forEach((leg: google.maps.DirectionsLeg) => {
+    leg.steps.forEach((step: google.maps.DirectionsStep) => {
+      step.path.forEach((point: google.maps.LatLng) => {
+        allPathPoints.push({
+          lat: point.lat(),
+          lng: point.lng()
+        });
+      });
+    });
+  });
+  return allPathPoints.length > 0 ? allPathPoints : directionsResult.routes[0].overview_path.map(point => ({
+    lat: point.lat(),
+    lng: point.lng()
+  }));
+};
+
+// Helper function to calculate total distance and duration from all legs
+const calculateRouteTotals = (directionsResult: google.maps.DirectionsResult) => {
+  const totalDistance = directionsResult.routes[0].legs.reduce((sum: number, leg: google.maps.DirectionsLeg) => {
+    return sum + (leg.distance?.value || 0);
+  }, 0);
+  const totalDuration = directionsResult.routes[0].legs.reduce((sum: number, leg: google.maps.DirectionsLeg) => {
+    return sum + (leg.duration?.value || 0);
+  }, 0);
+
+  const distanceText = totalDistance > 0 
+    ? `${(totalDistance / 1000).toFixed(1)} km` 
+    : directionsResult.routes[0].legs[0].distance?.text || '';
+  const durationText = totalDuration > 0
+    ? `${Math.floor(totalDuration / 3600)}h ${Math.floor((totalDuration % 3600) / 60)}m`
+    : directionsResult.routes[0].legs[0].duration?.text || '';
+
+  return { distanceText, durationText };
+};
+
 interface RoutePoints {
   start: google.maps.LatLngLiteral | null;
   end: google.maps.LatLngLiteral | null;
   waypoints: google.maps.LatLngLiteral[];
 }
+
+// AdvancedMarker component to replace deprecated Marker
+interface AdvancedMarkerProps {
+  position: google.maps.LatLngLiteral;
+  map: google.maps.Map | null;
+  onClick?: () => void;
+  color?: string;
+  scale?: number;
+}
+
+const AdvancedMarker: React.FC<AdvancedMarkerProps> = ({ position, map, onClick, color = '#FF0000', scale = 8 }) => {
+  const markerRef = useRef<any>(null);
+  const pinElementRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!map || !google?.maps?.marker?.AdvancedMarkerElement) {
+      // Fallback: if AdvancedMarkerElement is not available, silently fail
+      // The old Marker would have worked, but we're migrating away from it
+      return;
+    }
+
+    // Create pin element
+    const pinElement = document.createElement('div');
+    pinElement.style.width = `${scale * 2}px`;
+    pinElement.style.height = `${scale * 2}px`;
+    pinElement.style.borderRadius = '50%';
+    pinElement.style.backgroundColor = color;
+    pinElement.style.border = '2px solid #FFFFFF';
+    pinElement.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3)';
+    pinElement.style.cursor = 'pointer';
+    pinElementRef.current = pinElement;
+
+    // Create AdvancedMarkerElement
+    const marker = new google.maps.marker.AdvancedMarkerElement({
+      map,
+      position,
+      content: pinElement,
+    });
+
+    if (onClick) {
+      marker.addListener('click', onClick);
+    }
+
+    markerRef.current = marker;
+
+    return () => {
+      if (markerRef.current) {
+        markerRef.current.map = null;
+        markerRef.current = null;
+      }
+    };
+  }, [map, position, onClick, color, scale]);
+
+  return null; // This component doesn't render anything
+};
 
 interface Route {
   start: google.maps.LatLngLiteral;
@@ -95,11 +188,20 @@ const Map: React.FC<MapProps> = ({
     end: null,
     waypoints: []
   });
+  const [routePointNames, setRoutePointNames] = useState<{
+    start?: string;
+    waypoints: string[];
+    end?: string;
+  }>({
+    waypoints: []
+  });
 
   // Marker state
   const [markers, setMarkers] = useState<SavedMarker[]>([]);
   const [selectedMarker, setSelectedMarker] = useState<SavedMarker | null>(null);
   const [isAddingPin, setIsAddingPin] = useState(false);
+  const [markerPlaceName, setMarkerPlaceName] = useState<string>('');
+  const [isLoadingMarkerName, setIsLoadingMarkerName] = useState(false);
 
   // Location tracking state
   const [isRecording, setIsRecording] = useState(false);
@@ -268,6 +370,73 @@ const Map: React.FC<MapProps> = ({
     }
   }, [directions]);
 
+  // Helper function to get place name from coordinates
+  const getPlaceName = async (location: google.maps.LatLngLiteral): Promise<string> => {
+    return new Promise((resolve) => {
+      if (!google?.maps?.Geocoder) {
+        resolve(`${location.lat.toFixed(4)}, ${location.lng.toFixed(4)}`);
+        return;
+      }
+      const geocoder = new google.maps.Geocoder();
+      geocoder.geocode({ location }, (results, status) => {
+        if (status === 'OK' && results && results[0]) {
+          // Try to get a meaningful name - prefer formatted_address, then name, then types
+          const address = results[0].formatted_address;
+          const name = results[0].name;
+          const types = results[0].types;
+          
+          // If it's a point of interest, use the name
+          if (name && types && (types.includes('establishment') || types.includes('point_of_interest'))) {
+            resolve(name);
+          } else if (address) {
+            resolve(address);
+          } else if (name) {
+            resolve(name);
+          } else {
+            resolve(`${location.lat.toFixed(4)}, ${location.lng.toFixed(4)}`);
+          }
+        } else {
+          resolve(`${location.lat.toFixed(4)}, ${location.lng.toFixed(4)}`);
+        }
+      });
+    });
+  };
+
+  // Helper function to recalculate route when points change
+  const recalculateRoute = async () => {
+    if (!routePoints.start || routePoints.waypoints.length === 0 || !directionsService.current) {
+      setDirections(null);
+      return;
+    }
+
+    const lastWaypoint = routePoints.waypoints[routePoints.waypoints.length - 1];
+    const routeConfig: google.maps.DirectionsRequest = {
+      origin: routePoints.start,
+      destination: lastWaypoint,
+      waypoints: routePoints.waypoints.slice(0, -1).map(point => ({
+        location: new google.maps.LatLng(point.lat, point.lng),
+        stopover: true
+      })),
+      travelMode: google.maps.TravelMode.DRIVING
+    };
+
+    try {
+      const result = await new Promise<google.maps.DirectionsResult>((resolve, reject) => {
+        directionsService.current?.route(routeConfig, (result, status) => {
+          if (status === google.maps.DirectionsStatus.OK && result) {
+            resolve(result);
+          } else {
+            reject(new Error(`Directions request failed: ${status}`));
+          }
+        });
+      });
+      setDirections(result);
+    } catch (error) {
+      console.error('Error recalculating route:', error);
+      setDirections(null);
+    }
+  };
+
   const handleMapClick = async (e: google.maps.MapMouseEvent) => {
     if (!isAddingRoute || !e.latLng) return;
 
@@ -277,68 +446,26 @@ const Map: React.FC<MapProps> = ({
     };
 
     if (!routePoints.start) {
-      setRoutePoints({ ...routePoints, start: latLngLiteral, end: null });
+      // Set start point - use coordinates as name since we can't geocode
+      const placeName = `${latLngLiteral.lat.toFixed(4)}, ${latLngLiteral.lng.toFixed(4)}`;
+      setRoutePoints({ ...routePoints, start: latLngLiteral, end: null, waypoints: [] });
+      setRoutePointNames({ start: placeName, waypoints: [], end: undefined });
       setShowColorPalette(true);
-    } else if (!routePoints.end) {
-      // Get the current route state including the saved color
-      const state = await fetchRouteState();
-      if (!state) {
-        console.error('Failed to fetch route state');
-        return;
-      }
-
-      // Use the saved color from the route state
-      const routeColor = state.color || selectedColor;
-      console.log('Using route color:', routeColor);
-
-      setRoutePoints({ ...routePoints, end: latLngLiteral });
-      try {
-        const result = await directionsService.current?.route({
-          origin: routePoints.start,
-          destination: latLngLiteral,
-          travelMode: google.maps.TravelMode.DRIVING,
-        });
-
-        if (result?.routes?.[0]) {
-          const newRoute: Route = {
-            start: routePoints.start,
-            end: latLngLiteral,
-            waypoints: [],
-            overviewPath: result.routes[0].overview_path.map((point: google.maps.LatLng) => ({
-              lat: point.lat(),
-              lng: point.lng(),
-            })),
-            distance: result.routes[0].legs[0].distance?.text || '',
-            duration: result.routes[0].legs[0].duration?.text || '',
-            color: routeColor // Use the color from route state
-          };
-
-          try {
-            console.log('Saving route with color:', newRoute.color);
-            const response = await mapApi.saveRoute(newRoute);
-            
-            if (response.data) {
-              console.log('Route saved with color:', response.data.color);
-              setSavedRoutes([...savedRoutes, response.data]);
-              setRouteSuccess('Route saved successfully!');
-              setTimeout(() => setRouteSuccess(null), 3000);
-            } else {
-              throw new Error('Failed to save route');
-            }
-          } catch (error) {
-            console.error('Error saving route:', error);
-            setRouteError('Failed to save route. Please try again.');
-            setTimeout(() => setRouteError(null), 3000);
-          }
-        }
-      } catch (error) {
-        console.error('Error calculating route:', error);
-        setRouteError('Failed to calculate route. Please try again.');
-        setTimeout(() => setRouteError(null), 3000);
-      }
-      setRoutePoints({ start: null, end: null, waypoints: [] });
-      setIsAddingRoute(false);
-      setShowColorPalette(false);
+      await updateRouteState('start', latLngLiteral);
+    } else {
+      // Add waypoint (end will be set when finishing the route)
+      const placeName = `${latLngLiteral.lat.toFixed(4)}, ${latLngLiteral.lng.toFixed(4)}`;
+      setRoutePoints(prev => ({
+        ...prev,
+        waypoints: [...prev.waypoints, latLngLiteral]
+      }));
+      setRoutePointNames(prev => ({
+        ...prev,
+        waypoints: [...prev.waypoints, placeName]
+      }));
+      await updateRouteState('waypoint', null);
+      // Recalculate route with new waypoint
+      setTimeout(() => recalculateRoute(), 100);
     }
   };
 
@@ -402,7 +529,8 @@ const Map: React.FC<MapProps> = ({
         setSavedRoutes(routesWithColors);
         setMarkers(markersResponse.data.map((m: any) => ({
           _id: m._id,
-          position: m.position
+          position: m.position,
+          name: m.name
         })));
       } catch (error) {
         console.error('Error loading data:', error);
@@ -448,23 +576,24 @@ const Map: React.FC<MapProps> = ({
   const deleteRoute = async (id: string) => {
     try {
       await mapApi.deleteRoute(id);
-      setSavedRoutes(prev => prev.filter(route => route._id !== id));
       setRouteSuccess('Route deleted successfully!');
       setTimeout(() => setRouteSuccess(null), 3000);
     } catch (error) {
       console.error('Error deleting route:', error);
       setRouteError('Error deleting route');
       setTimeout(() => setRouteError(null), 3000);
+      throw error; // Re-throw so confirmDelete knows it failed
     }
   };
 
   // Save marker to API
-  const saveMarker = async (position: google.maps.LatLngLiteral) => {
+  const saveMarker = async (position: google.maps.LatLngLiteral, name?: string) => {
     try {
-      const response = await mapApi.saveMarker({ position });
+      const response = await mapApi.saveMarker({ position, name });
       setMarkers(prev => [...prev, {
         _id: response.data._id,
-        position
+        position,
+        name: response.data.name
       }]);
     } catch (error) {
       console.error('Error saving marker:', error);
@@ -552,16 +681,39 @@ const Map: React.FC<MapProps> = ({
       // Use the color from route state or fallback to selected color
       const routeColor = state.color || selectedColor;
 
+      // Extract full path and calculate totals (handles waypoints correctly)
+      const fullPath = extractFullPath(result);
+      const { distanceText, durationText } = calculateRouteTotals(result);
+
+      // Validate path data
+      if (!fullPath || fullPath.length === 0) {
+        setRouteError('Failed to generate route path. Please try again.');
+        return;
+      }
+
+      // Ensure all path points are valid numbers
+      const validPath = fullPath.filter(point => 
+        point && 
+        typeof point.lat === 'number' && 
+        typeof point.lng === 'number' && 
+        !isNaN(point.lat) && 
+        !isNaN(point.lng) &&
+        isFinite(point.lat) &&
+        isFinite(point.lng)
+      );
+
+      if (validPath.length === 0) {
+        setRouteError('Invalid route path data. Please try again.');
+        return;
+      }
+
       const routeData = {
         start: state.startLocation,
         end: lastWaypoint,
         waypoints: routePoints.waypoints.slice(0, -1),
-        overviewPath: result.routes[0].overview_path.map(point => ({
-          lat: point.lat(),
-          lng: point.lng()
-        })),
-        distance: result.routes[0].legs[0].distance?.text || '',
-        duration: result.routes[0].legs[0].duration?.text || '',
+        overviewPath: validPath,
+        distance: distanceText,
+        duration: durationText,
         color: routeColor // Use the color from route state
       };
 
@@ -652,6 +804,8 @@ const Map: React.FC<MapProps> = ({
       console.log('Canceling route creation, resetting all route state');
       setIsAddingRoute(false);
       setDirections(null);
+      setRoutePoints({ start: null, end: null, waypoints: [] });
+      setRoutePointNames({ waypoints: [] });
       setSearchQuery('');
       setRouteError(null);
       setRouteSuccess(null);
@@ -662,6 +816,8 @@ const Map: React.FC<MapProps> = ({
       console.log('Starting new route, initializing route state');
       setIsAddingRoute(true);
       setShowColorPalette(true);
+      setRoutePoints({ start: null, end: null, waypoints: [] });
+      setRoutePointNames({ waypoints: [] });
       
       // Fetch current route state to get saved color
       const state = await fetchRouteState();
@@ -763,7 +919,8 @@ const Map: React.FC<MapProps> = ({
 
     if (isAddingPin) {
       try {
-        const response = await mapApi.saveMarker({ position: location });
+        const placeName = place.name || place.formatted_address || undefined;
+        const response = await mapApi.saveMarker({ position: location, name: placeName });
         setMarkers(prev => [...prev, response.data]);
         setRouteSuccess('Marker added successfully!');
         setTimeout(() => setRouteSuccess(null), 3000);
@@ -782,23 +939,32 @@ const Map: React.FC<MapProps> = ({
         return;
       }
 
+      const placeName = place.name || place.formatted_address || `${location.lat.toFixed(4)}, ${location.lng.toFixed(4)}`;
+
       if (!state.startLocation) {
         console.log('Setting start location');
         setRoutePoints(prev => ({
           ...prev,
           start: location,
-          end: null
+          end: null,
+          waypoints: []
         }));
+        setRoutePointNames({ start: placeName, waypoints: [], end: undefined });
         await updateRouteState('start', location);
         setSearchQuery(''); // Clear search field
       } else {
-        console.log('Setting end location');
+        console.log('Adding waypoint');
         setRoutePoints(prev => ({
           ...prev,
-          end: location,
           waypoints: [...prev.waypoints, location]
         }));
+        setRoutePointNames(prev => ({
+          ...prev,
+          waypoints: [...prev.waypoints, placeName]
+        }));
         setSearchQuery(''); // Clear search field
+        // Recalculate route with new waypoint
+        setTimeout(() => recalculateRoute(), 100);
         
         // Show the finish route button
         if (state.startLocation && location) {
@@ -832,9 +998,12 @@ const Map: React.FC<MapProps> = ({
     }
   };
 
-  const handleMarkerClick = (marker: SavedMarker) => {
+  const handleMarkerClick = async (marker: SavedMarker) => {
     setSelectedMarker(marker);
     setSelectedRoute(null);
+    // Use stored name if available, otherwise show coordinates
+    setMarkerPlaceName(marker.name || `${marker.position.lat.toFixed(4)}, ${marker.position.lng.toFixed(4)}`);
+    setIsLoadingMarkerName(false);
   };
 
   const handleRouteClick = (route: SavedRoute, index: number) => {
@@ -853,26 +1022,30 @@ const Map: React.FC<MapProps> = ({
     setShowDeleteConfirm(true);
   };
 
-  const confirmDelete = () => {
+  const confirmDelete = async () => {
     if (!itemToDelete) return;
 
     if (itemToDelete.type === 'marker') {
       const updatedMarkers = markers.filter(marker => marker._id !== itemToDelete.id);
       setMarkers(updatedMarkers);
-      deleteMarker(itemToDelete.id);
+      await deleteMarker(itemToDelete.id);
     } else if (itemToDelete.type === 'route') {
       const updatedRoutes = savedRoutes.filter(route => route._id !== itemToDelete.id);
       setSavedRoutes(updatedRoutes);
-      deleteRoute(itemToDelete.id);
+      await deleteRoute(itemToDelete.id);
       
       if (selectedRoute && selectedRoute._id === itemToDelete.id) {
         setDirections(null);
       }
+      // Force re-render to update the map
+      setRenderKey(prev => prev + 1);
     }
 
     setShowDeleteConfirm(false);
     setItemToDelete(null);
     setSelectedMarker(null);
+    setMarkerPlaceName('');
+    setIsLoadingMarkerName(false);
     setSelectedRoute(null);
     setShowDeleteButton(false);
   };
@@ -928,22 +1101,105 @@ const Map: React.FC<MapProps> = ({
               <div className="text-green-500 text-sm">{routeSuccess}</div>
             )}
             {isAddingRoute && (
-              <div className="flex justify-between mt-2">
-                <button
-                  onClick={handleStartNewRoute}
-                  className="px-3 py-1.5 bg-red-500 text-white rounded hover:bg-red-600 text-sm"
-                >
-                  Cancel Route
-                </button>
-                {routePoints.start && (
-                  <button
-                    onClick={handleFinishRoute}
-                    className="px-3 py-1.5 bg-green-500 text-white rounded hover:bg-green-600 text-sm"
-                  >
-                    Finish Route
-                  </button>
+              <>
+                {/* Route Points List */}
+                {(routePoints.start || routePoints.waypoints.length > 0 || routePoints.end) && (
+                  <div className="mt-3 border-t pt-3">
+                    <div className="text-xs font-semibold text-gray-600 mb-2">Route Points:</div>
+                    <div className="space-y-1 max-h-48 overflow-y-auto">
+                      {/* Start Point */}
+                      {routePoints.start && (
+                        <div 
+                          className="flex items-center justify-between p-2 bg-green-50 rounded text-sm cursor-pointer hover:bg-green-100 transition-colors"
+                          onClick={() => {
+                            if (mapRef.current) {
+                              mapRef.current.setCenter(routePoints.start!);
+                              mapRef.current.setZoom(Math.max(mapRef.current.getZoom() || 12, 15));
+                            }
+                          }}
+                          title="Click to center map on this point"
+                        >
+                          <div className="flex items-center space-x-2 flex-1 min-w-0">
+                            <span className="font-semibold text-green-700 flex-shrink-0">Start:</span>
+                            <span className="text-gray-700 truncate">
+                              {routePointNames.start || `${routePoints.start.lat.toFixed(4)}, ${routePoints.start.lng.toFixed(4)}`}
+                            </span>
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRoutePoints({ ...routePoints, start: null });
+                              setRoutePointNames(prev => ({ ...prev, start: undefined }));
+                              recalculateRoute();
+                            }}
+                            className="text-red-500 hover:text-red-700 text-xs px-2 py-1 flex-shrink-0"
+                            title="Remove start point"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      )}
+                      
+                      {/* Waypoints */}
+                      {routePoints.waypoints.map((waypoint, index) => (
+                        <div 
+                          key={index} 
+                          className="flex items-center justify-between p-2 bg-blue-50 rounded text-sm cursor-pointer hover:bg-blue-100 transition-colors"
+                          onClick={() => {
+                            if (mapRef.current) {
+                              mapRef.current.setCenter(waypoint);
+                              mapRef.current.setZoom(Math.max(mapRef.current.getZoom() || 12, 15));
+                            }
+                          }}
+                          title="Click to center map on this waypoint"
+                        >
+                          <div className="flex items-center space-x-2 flex-1 min-w-0">
+                            <span className="font-semibold text-blue-700 flex-shrink-0">Waypoint {index + 1}:</span>
+                            <span className="text-gray-700 truncate">
+                              {routePointNames.waypoints[index] || `${waypoint.lat.toFixed(4)}, ${waypoint.lng.toFixed(4)}`}
+                            </span>
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const newWaypoints = [...routePoints.waypoints];
+                              newWaypoints.splice(index, 1);
+                              const newNames = [...routePointNames.waypoints];
+                              newNames.splice(index, 1);
+                              setRoutePoints({ ...routePoints, waypoints: newWaypoints });
+                              setRoutePointNames(prev => ({ ...prev, waypoints: newNames }));
+                              recalculateRoute();
+                            }}
+                            className="text-red-500 hover:text-red-700 text-xs px-2 py-1 flex-shrink-0"
+                            title="Remove waypoint"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 )}
-              </div>
+                
+                {/* Action Buttons */}
+                <div className="flex justify-between mt-3">
+                  <button
+                    onClick={handleStartNewRoute}
+                    className="px-3 py-1.5 bg-red-500 text-white rounded hover:bg-red-600 text-sm"
+                  >
+                    Cancel Route
+                  </button>
+                  {routePoints.start && routePoints.waypoints.length > 0 && (
+                    <button
+                      onClick={handleFinishRoute}
+                      className="px-3 py-1.5 bg-green-500 text-white rounded hover:bg-green-600 text-sm"
+                      disabled={routePoints.waypoints.length === 0}
+                    >
+                      Finish Route ({routePoints.waypoints.length} {routePoints.waypoints.length === 1 ? 'waypoint' : 'waypoints'})
+                    </button>
+                  )}
+                </div>
+              </>
             )}
           </div>
         </div>
@@ -962,21 +1218,17 @@ const Map: React.FC<MapProps> = ({
         options={{
           streetViewControl: false,
           mapTypeControl: false,
-          fullscreenControl: false
+          fullscreenControl: false,
+          mapId: import.meta.env.VITE_GOOGLE_MAPS_MAP_ID || 'DEMO_MAP_ID'
         }}
       >
         {/* Current location marker */}
-        {currentLocation && (
-          <Marker
+        {currentLocation && mapRef.current && (
+          <AdvancedMarker
             position={currentLocation}
-            icon={{
-              path: google.maps.SymbolPath.CIRCLE,
-              scale: 10,
-              fillColor: '#4285F4',
-              fillOpacity: 1,
-              strokeColor: '#FFFFFF',
-              strokeWeight: 2
-            }}
+            map={mapRef.current}
+            color="#4285F4"
+            scale={10}
           />
         )}
 
@@ -992,21 +1244,43 @@ const Map: React.FC<MapProps> = ({
           />
         )}
 
+        {/* Route creation markers */}
+        {isAddingRoute && mapRef.current && (
+          <>
+            {/* Start point marker */}
+            {routePoints.start && (
+              <AdvancedMarker
+                position={routePoints.start}
+                map={mapRef.current}
+                color="#00FF00"
+                scale={10}
+              />
+            )}
+            {/* Waypoint markers */}
+            {routePoints.waypoints.map((waypoint, index) => (
+              <AdvancedMarker
+                key={`waypoint-${index}`}
+                position={waypoint}
+                map={mapRef.current}
+                color="#0000FF"
+                scale={8}
+              />
+            ))}
+          </>
+        )}
+
         {/* Placed markers */}
         {markers.map((marker) => (
-          <Marker
-            key={marker._id}
-            position={marker.position}
-            onClick={() => handleMarkerClick(marker)}
-            icon={{
-              path: google.maps.SymbolPath.CIRCLE,
-              scale: 8,
-              fillColor: '#FF0000',
-              fillOpacity: 1,
-              strokeColor: '#FFFFFF',
-              strokeWeight: 2
-            }}
-          />
+          mapRef.current && (
+            <AdvancedMarker
+              key={marker._id}
+              position={marker.position}
+              map={mapRef.current}
+              onClick={() => handleMarkerClick(marker)}
+              color="#FF0000"
+              scale={8}
+            />
+          )
         ))}
 
         {/* Current route */}
@@ -1036,17 +1310,16 @@ const Map: React.FC<MapProps> = ({
                 clickable: true
               }}
               onClick={() => {
+                const fullPath = extractFullPath(directions);
+                const { distanceText, durationText } = calculateRouteTotals(directions);
                 const currentRoute: SavedRoute = {
                   _id: Date.now().toString(),
                   start: routePoints.start!,
                   end: routePoints.waypoints[routePoints.waypoints.length - 1]!,
                   waypoints: routePoints.waypoints.slice(0, -1),
-                  overviewPath: directions.routes[0].overview_path.map(latLng => ({
-                    lat: latLng.lat(),
-                    lng: latLng.lng()
-                  })),
-                  distance: directions.routes[0].legs[0].distance?.text || '',
-                  duration: directions.routes[0].legs[0].duration?.text || '',
+                  overviewPath: fullPath,
+                  distance: distanceText,
+                  duration: durationText,
                   color: selectedColor
                 };
                 handleRouteClick(currentRoute, -1);
@@ -1071,21 +1344,51 @@ const Map: React.FC<MapProps> = ({
           />
         ))}
 
-        {/* Selected marker info window */}
+        {/* Selected marker confirmation dialog */}
         {selectedMarker && (
-          <OverlayView
-            position={selectedMarker.position}
-            mapPaneName={OverlayView.OVERLAY_MOUSE_TARGET}
-          >
-            <div className="bg-white p-2 rounded shadow-lg">
+          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-white p-6 rounded-lg shadow-xl z-50 min-w-[350px] max-w-[500px]">
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">
+              Marker Selected
+            </h3>
+            <div className="mb-4">
+              <div className="text-sm text-gray-600 mb-2">
+                <span className="font-semibold">Location:</span>
+              </div>
+              <div className="text-sm text-gray-800 bg-gray-50 p-2 rounded min-h-[40px]">
+                {isLoadingMarkerName ? (
+                  <span className="text-gray-500 italic">Loading location name...</span>
+                ) : (
+                  <span>{markerPlaceName || `${selectedMarker.position.lat.toFixed(4)}, ${selectedMarker.position.lng.toFixed(4)}`}</span>
+                )}
+              </div>
+              <div className="text-xs text-gray-500 mt-1">
+                Coordinates: {selectedMarker.position.lat.toFixed(6)}, {selectedMarker.position.lng.toFixed(6)}
+              </div>
+            </div>
+            <div className="flex justify-end space-x-3">
               <button
-                onClick={() => handleDeleteClick('marker', selectedMarker._id)}
-                className="px-2 py-1 bg-red-500 text-white rounded hover:bg-red-600 text-sm"
+                onClick={() => {
+                  setSelectedMarker(null);
+                  setMarkerPlaceName('');
+                  setIsLoadingMarkerName(false);
+                }}
+                className="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 transition-colors"
               >
-                Delete
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  handleDeleteClick('marker', selectedMarker._id);
+                  setSelectedMarker(null);
+                  setMarkerPlaceName('');
+                  setIsLoadingMarkerName(false);
+                }}
+                className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition-colors"
+              >
+                Delete Marker
               </button>
             </div>
-          </OverlayView>
+          </div>
         )}
 
         {/* Selected route color palette */}
@@ -1177,18 +1480,25 @@ const Map: React.FC<MapProps> = ({
 
       {/* Delete confirmation dialog */}
       {showDeleteConfirm && itemToDelete && (
-        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-white p-4 rounded shadow-lg z-50">
-          <p>Are you sure you want to delete this {itemToDelete.type}?</p>
-          <div className="flex justify-end mt-4 space-x-2">
+        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-white p-6 rounded-lg shadow-xl z-50 min-w-[300px]">
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">
+            Delete {itemToDelete.type === 'route' ? 'Route' : 'Marker'}?
+          </h3>
+          <p className="text-gray-600 mb-4">
+            {itemToDelete.type === 'route' 
+              ? 'Are you sure you want to delete this route? This action cannot be undone.'
+              : 'Are you sure you want to delete this marker? This action cannot be undone.'}
+          </p>
+          <div className="flex justify-end space-x-3">
             <button
               onClick={() => setShowDeleteConfirm(false)}
-              className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300"
+              className="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 transition-colors"
             >
               Cancel
             </button>
             <button
               onClick={confirmDelete}
-              className="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600"
+              className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition-colors"
             >
               Delete
             </button>

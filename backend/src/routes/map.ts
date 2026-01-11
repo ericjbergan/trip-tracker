@@ -22,7 +22,41 @@ router.get('/routes', async (req, res) => {
 // Save a route
 router.post('/routes', async (req, res) => {
   try {
-    console.log('Saving new route:', req.body);
+    console.log('Saving new route:', JSON.stringify(req.body, null, 2));
+    
+    // Validate required fields
+    if (!req.body.start || typeof req.body.start.lat !== 'number' || typeof req.body.start.lng !== 'number') {
+      return res.status(400).json({ message: 'Invalid start location' });
+    }
+    if (!req.body.end || typeof req.body.end.lat !== 'number' || typeof req.body.end.lng !== 'number') {
+      return res.status(400).json({ message: 'Invalid end location' });
+    }
+    if (!Array.isArray(req.body.overviewPath) || req.body.overviewPath.length === 0) {
+      return res.status(400).json({ message: 'overviewPath must be a non-empty array' });
+    }
+    if (!req.body.distance || typeof req.body.distance !== 'string') {
+      return res.status(400).json({ message: 'Invalid distance' });
+    }
+    if (!req.body.duration || typeof req.body.duration !== 'string') {
+      return res.status(400).json({ message: 'Invalid duration' });
+    }
+    if (!req.body.color || typeof req.body.color !== 'string') {
+      return res.status(400).json({ message: 'Invalid color' });
+    }
+
+    // Ensure waypoints is an array (can be empty)
+    if (!Array.isArray(req.body.waypoints)) {
+      req.body.waypoints = [];
+    }
+
+    // Validate overviewPath points
+    const validPath = req.body.overviewPath.every((point: any) => 
+      point && typeof point.lat === 'number' && typeof point.lng === 'number'
+    );
+    if (!validPath) {
+      return res.status(400).json({ message: 'Invalid overviewPath: all points must have lat and lng numbers' });
+    }
+
     // Remove _id field if it exists to let MongoDB generate it
     const { _id, ...routeData } = req.body;
     const route = new Route(routeData);
@@ -31,7 +65,19 @@ router.post('/routes', async (req, res) => {
     res.status(201).json(savedRoute);
   } catch (error) {
     console.error('Error saving route:', error);
-    res.status(400).json({ message: 'Error saving route', error: error instanceof Error ? error.message : 'Unknown error' });
+    // Check if it's a validation error (400) or server error (500)
+    if (error instanceof Error && error.name === 'ValidationError') {
+      res.status(400).json({ 
+        message: 'Validation error', 
+        error: error.message 
+      });
+    } else {
+      res.status(500).json({ 
+        message: 'Internal server error', 
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: process.env.NODE_ENV === 'development' && error instanceof Error ? error.stack : undefined
+      });
+    }
   }
 });
 
