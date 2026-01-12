@@ -7,7 +7,10 @@
     "start": "node dist/index.js",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "build": "tsc",
-    "test-db": "ts-node src/scripts/test-db.ts"
+    "test-db": "ts-node src/scripts/test-db.ts",
+    "query-route": "ts-node src/scripts/query-route.ts",
+    "calculate-route": "ts-node src/scripts/calculate-route.ts",
+    "calculate-distance": "ts-node src/scripts/calculate-distance.ts"
   },
   "keywords": [],
   "author": "",

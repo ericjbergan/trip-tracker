@@ -13,4 +13,5 @@ export interface SavedMarker {
   _id: string;
   position: google.maps.LatLngLiteral;
   name?: string;
+  isLarge?: boolean;
 } 

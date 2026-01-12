@@ -6,6 +6,7 @@ export interface IMarker extends Document {
     lng: number;
   };
   name?: string;
+  isLarge?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -15,7 +16,8 @@ const MarkerSchema: Schema = new Schema({
     lat: { type: Number, required: true },
     lng: { type: Number, required: true }
   },
-  name: { type: String }
+  name: { type: String },
+  isLarge: { type: Boolean, default: false }
 }, {
   timestamps: true
 });

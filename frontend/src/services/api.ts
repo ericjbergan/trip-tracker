@@ -19,5 +19,6 @@ export const mapApi = {
   // Markers
   getMarkers: () => api.get('/map/markers'),
   saveMarker: (marker: any) => api.post('/map/markers', marker),
+  updateMarker: (id: string, marker: any) => api.put(`/map/markers/${id}`, marker),
   deleteMarker: (id: string) => api.delete(`/map/markers/${id}`),
 }; 

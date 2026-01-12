@@ -125,6 +125,35 @@ router.post('/markers', async (req, res) => {
   }
 });
 
+// Update a marker
+router.put('/markers/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const markerData = req.body;
+
+    console.log('Updating marker:', {
+      id,
+      updates: markerData
+    });
+
+    const updatedMarker = await Marker.findByIdAndUpdate(
+      id,
+      { $set: markerData },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedMarker) {
+      return res.status(404).json({ message: 'Marker not found' });
+    }
+
+    console.log('Marker updated successfully:', updatedMarker._id);
+    res.json(updatedMarker);
+  } catch (error) {
+    console.error('Error updating marker:', error);
+    res.status(500).json({ message: 'Error updating marker', error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
 // Delete a marker
 router.delete('/markers/:id', async (req, res) => {
   try {
