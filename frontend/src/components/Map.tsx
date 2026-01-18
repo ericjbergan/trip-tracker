@@ -515,7 +515,6 @@ const Map: React.FC<MapProps> = ({
 
   useEffect(() => {
     if (isLoaded && window.google) {
-      console.log('Initializing DirectionsService');
       directionsService.current = new window.google.maps.DirectionsService();
     }
   }, [isLoaded]);
@@ -1114,7 +1113,6 @@ const Map: React.FC<MapProps> = ({
     // Save the selected color to MongoDB
     try {
       const response = await updateRouteState('color', color);
-      console.log('Color saved to route state:', response);
       
       // Update local state
       setShowColorPalette(false);
@@ -1265,7 +1263,6 @@ const Map: React.FC<MapProps> = ({
   const handlePlaceSelection = useCallback(async (place: google.maps.places.PlaceResult) => {
     // Prevent duplicate processing
     if (isProcessingPlaceSelectionRef.current) {
-      console.log('Already processing place selection, skipping duplicate call');
       return;
     }
 
@@ -2271,7 +2268,6 @@ const Map: React.FC<MapProps> = ({
                         }`}
                         onClick={(e) => {
                           e.stopPropagation();
-                          console.log('Color button clicked:', color.value);
                           handleRouteColorChange(color.value);
                         }}
                       >
