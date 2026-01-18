@@ -7,6 +7,8 @@ export interface IMarker extends Document {
   };
   name?: string;
   isLarge?: boolean;
+  color?: string;
+  showLabel?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -17,7 +19,9 @@ const MarkerSchema: Schema = new Schema({
     lng: { type: Number, required: true }
   },
   name: { type: String },
-  isLarge: { type: Boolean, default: false }
+  isLarge: { type: Boolean, default: false },
+  color: { type: String, default: '#FF0000' },
+  showLabel: { type: Boolean, default: true }
 }, {
   timestamps: true
 });

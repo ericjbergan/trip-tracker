@@ -10,7 +10,8 @@
     "test-db": "ts-node src/scripts/test-db.ts",
     "query-route": "ts-node src/scripts/query-route.ts",
     "calculate-route": "ts-node src/scripts/calculate-route.ts",
-    "calculate-distance": "ts-node src/scripts/calculate-distance.ts"
+    "calculate-distance": "ts-node src/scripts/calculate-distance.ts",
+    "backup": "ts-node src/scripts/backup-data.ts"
   },
   "keywords": [],
   "author": "",

@@ -21,4 +21,8 @@ export const mapApi = {
   saveMarker: (marker: any) => api.post('/map/markers', marker),
   updateMarker: (id: string, marker: any) => api.put(`/map/markers/${id}`, marker),
   deleteMarker: (id: string) => api.delete(`/map/markers/${id}`),
+
+  // Backup/Restore
+  exportData: () => api.get('/map/export'),
+  importData: (data: any) => api.post('/map/import', data),
 }; 

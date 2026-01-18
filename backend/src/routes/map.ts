@@ -274,4 +274,106 @@ router.put('/route-state', async (req: Request, res: Response) => {
   }
 });
 
+// Export all data (backup)
+router.get('/export', async (req, res) => {
+  try {
+    console.log('Exporting all data...');
+    const routes = await Route.find({}).sort({ createdAt: -1 });
+    const markers = await Marker.find({}).sort({ createdAt: -1 });
+
+    const exportData = {
+      exportDate: new Date().toISOString(),
+      version: '1.0',
+      routes: routes.map(route => ({
+        _id: route._id.toString(),
+        start: route.start,
+        end: route.end,
+        waypoints: route.waypoints,
+        overviewPath: route.overviewPath,
+        distance: route.distance,
+        duration: route.duration,
+        color: route.color,
+        createdAt: route.createdAt,
+        updatedAt: route.updatedAt
+      })),
+      markers: markers.map(marker => ({
+        _id: marker._id.toString(),
+        position: marker.position,
+        name: marker.name,
+        isLarge: marker.isLarge,
+        color: marker.color,
+        showLabel: marker.showLabel,
+        createdAt: marker.createdAt,
+        updatedAt: marker.updatedAt
+      }))
+    };
+
+    console.log(`Exported ${routes.length} routes and ${markers.length} markers`);
+    res.json(exportData);
+  } catch (error) {
+    console.error('Error exporting data:', error);
+    res.status(500).json({ message: 'Error exporting data', error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+// Import/restore data
+router.post('/import', async (req, res) => {
+  try {
+    console.log('Importing data...');
+    const { routes, markers } = req.body;
+
+    if (!routes || !Array.isArray(routes)) {
+      return res.status(400).json({ message: 'Invalid routes data' });
+    }
+    if (!markers || !Array.isArray(markers)) {
+      return res.status(400).json({ message: 'Invalid markers data' });
+    }
+
+    // Clear existing data (optional - you might want to merge instead)
+    // await Route.deleteMany({});
+    // await Marker.deleteMany({});
+
+    // Import routes
+    let importedRoutes = 0;
+    if (routes.length > 0) {
+      const routesToImport = routes.map((route: any) => ({
+        start: route.start,
+        end: route.end,
+        waypoints: route.waypoints || [],
+        overviewPath: route.overviewPath,
+        distance: route.distance,
+        duration: route.duration,
+        color: route.color || '#0000FF'
+      }));
+      await Route.insertMany(routesToImport);
+      importedRoutes = routesToImport.length;
+    }
+
+    // Import markers
+    let importedMarkers = 0;
+    if (markers.length > 0) {
+      const markersToImport = markers.map((marker: any) => ({
+        position: marker.position,
+        name: marker.name,
+        isLarge: marker.isLarge || false,
+        color: marker.color || '#FF0000',
+        showLabel: marker.showLabel !== undefined ? marker.showLabel : true
+      }));
+      await Marker.insertMany(markersToImport);
+      importedMarkers = markersToImport.length;
+    }
+
+    console.log(`Imported ${importedRoutes} routes and ${importedMarkers} markers`);
+    res.json({ 
+      success: true, 
+      importedRoutes, 
+      importedMarkers,
+      message: `Successfully imported ${importedRoutes} routes and ${importedMarkers} markers` 
+    });
+  } catch (error) {
+    console.error('Error importing data:', error);
+    res.status(500).json({ message: 'Error importing data', error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
 export default router; 
