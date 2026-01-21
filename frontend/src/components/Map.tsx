@@ -1204,11 +1204,6 @@ const Map: React.FC<MapProps> = ({
     }
 
     try {
-        routeId: selectedRoute._id,
-        from: selectedRoute.color,
-        to: color
-      });
-
       // Update local state immediately for better UX
       const updatedRoute = {
         ...selectedRoute,
