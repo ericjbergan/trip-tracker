@@ -11,7 +11,8 @@
     "query-route": "ts-node src/scripts/query-route.ts",
     "calculate-route": "ts-node src/scripts/calculate-route.ts",
     "calculate-distance": "ts-node src/scripts/calculate-distance.ts",
-    "backup": "ts-node src/scripts/backup-data.ts"
+    "backup": "ts-node src/scripts/backup-data.ts",
+    "fix-routes": "ts-node src/scripts/fix-route-paths.ts"
   },
   "keywords": [],
   "author": "",

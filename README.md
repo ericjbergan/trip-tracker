@@ -61,7 +61,12 @@ A full-stack application for tracking travel routes and locations with an intera
      ```
      VITE_API_URL=http://localhost:3000/api
      VITE_GOOGLE_MAPS_API_KEY=your_google_maps_api_key
+     VITE_GOOGLE_MAPS_MAP_ID=your_map_id  # optional; required for Advanced Markers
      ```
+
+   **Google Maps API key:**
+   - **Frontend:** If you see `RefererNotAllowedMapError`, add your dev URL to the key's HTTP referrer restrictions in [Google Cloud Console](https://console.cloud.google.com/apis/credentials) (e.g. `http://localhost:5174/*`).
+   - **Backend scripts** (`npm run fix-routes`, `npm run calculate-route`): These call the Directions API from the server. Keys with HTTP referrer restrictions get `REQUEST_DENIED`. Use a **second** API key with **no** application restrictions (or "IP addresses" only) and set it in backend `.env` as `GOOGLE_MAPS_SERVER_API_KEY=...` or `GOOGLE_MAPS_API_KEY=...`.
 
 4. Start development servers:
    ```bash

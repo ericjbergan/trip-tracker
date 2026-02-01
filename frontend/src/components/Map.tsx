@@ -1,7 +1,21 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { GoogleMap, useLoadScript, Polyline, Autocomplete, DirectionsRenderer, OverlayView } from '@react-google-maps/api';
 import { SavedRoute, SavedMarker } from '../types/map';
 import { mapApi } from '../services/api';
+
+// Error boundary so one bad marker doesn't break the whole map
+class MarkerErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
+  state = { hasError: false };
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error: Error) {
+    console.error('Marker error boundary caught:', error?.message ?? error);
+  }
+  render() {
+    return this.state.hasError ? null : this.props.children;
+  }
+}
 
 const libraries: ("places" | "drawing" | "geometry" | "visualization" | "marker")[] = ['places', 'geometry', 'marker'];
 
@@ -89,6 +103,7 @@ const AdvancedMarker: React.FC<AdvancedMarkerProps> = ({ position, map, onClick,
 
   // Separate effect for label updates - doesn't affect pin rendering
   useEffect(() => {
+    if (!map || position == null || typeof position.lat !== 'number' || typeof position.lng !== 'number') return;
     // Only update label if it changed and marker exists
     if (markerRef.current && markerRef.current.map === map && labelRef.current !== label) {
       labelRef.current = label;
@@ -138,7 +153,10 @@ const AdvancedMarker: React.FC<AdvancedMarkerProps> = ({ position, map, onClick,
   useEffect(() => {
     if (!map || !google?.maps?.marker?.AdvancedMarkerElement) {
       // Fallback: if AdvancedMarkerElement is not available, silently fail
-      // The old Marker would have worked, but we're migrating away from it
+      return;
+    }
+    // Avoid passing invalid position to API (can cause "reading 'keys' of undefined")
+    if (position == null || typeof position.lat !== 'number' || typeof position.lng !== 'number') {
       return;
     }
 
@@ -259,15 +277,22 @@ const AdvancedMarker: React.FC<AdvancedMarkerProps> = ({ position, map, onClick,
     wrapper.style.transform = 'translateX(50%)'; // Shift right by 50% of container width
     wrapper.appendChild(container);
 
-    // Create the marker - PIN IS ALWAYS VISIBLE, label is optional
-    const marker = new google.maps.marker.AdvancedMarkerElement({
-      map, // Marker is ALWAYS added to map - never removed due to label changes
-      position,
-      content: wrapper, // Contains pin (always) + label (conditional)
-    });
+    // Normalize position to a plain literal (API can throw on non-plain objects, e.g. "reading 'keys' of undefined")
+    const positionLiteral: google.maps.LatLngLiteral = { lat: Number(position.lat), lng: Number(position.lng) };
 
-    if (onClick) {
-      marker.addListener('click', onClick);
+    let marker: google.maps.marker.AdvancedMarkerElement | null = null;
+    try {
+      marker = new google.maps.marker.AdvancedMarkerElement({
+        map,
+        position: positionLiteral,
+        content: wrapper,
+      });
+      if (onClick) {
+        marker.addListener('click', onClick);
+      }
+    } catch (err) {
+      console.error('AdvancedMarkerElement creation failed:', err);
+      return;
     }
 
     markerRef.current = marker;
@@ -1069,7 +1094,11 @@ const Map: React.FC<MapProps> = ({
       try {
         const response = await mapApi.saveRoute(routeData);
         setRouteSuccess('Route saved successfully!');
-        
+        // Add the new route so the map refreshes without reloading
+        const saved = response.data;
+        if (saved && saved._id) {
+          setSavedRoutes(prev => [...prev, { ...saved, color: saved.color || routeColor }]);
+        }
         // Reset state and clear route creation markers
         setIsAddingRoute(false);
         setRoutePoints({
@@ -1784,10 +1813,10 @@ const Map: React.FC<MapProps> = ({
           />
         )}
 
-        {/* Recorded path */}
-        {path.length > 1 && (
+        {/* Recorded path - ensure path is valid array to avoid setAt errors */}
+        {path.length > 1 && Array.isArray(path) && path.every(p => p != null && typeof (p as { lat?: unknown }).lat === 'number' && typeof (p as { lng?: unknown }).lng === 'number') && (
           <Polyline
-            path={path}
+            path={path.map(p => ({ lat: Number((p as { lat: number }).lat), lng: Number((p as { lng: number }).lng) }))}
             options={{
               strokeColor: '#FF0000',
               strokeOpacity: 1,
@@ -1830,32 +1859,29 @@ const Map: React.FC<MapProps> = ({
           </>
         )}
 
-        {/* Placed markers - PINS ALWAYS RENDER, labels are conditional */}
+        {/* Placed markers - PINS ALWAYS RENDER, labels are conditional. Each wrapped in error boundary so one bad marker doesn't break the map. */}
         {mapRef.current && markers.map((marker) => {
-          if (!marker || !marker._id || !marker.position) {
+          const pos = marker?.position;
+          if (!marker || !marker._id || !pos || typeof pos.lat !== 'number' || typeof pos.lng !== 'number') {
             return null;
           }
           
-          // Determine if label should be shown (PIN IS NOT AFFECTED BY THIS):
-          // - If showLabel is explicitly set (true or false), use that value (individual setting takes precedence)
-          // - If showLabel is undefined, use global toggle
           const shouldShowLabel = marker.showLabel !== undefined 
             ? marker.showLabel 
             : showPinLabels;
           const labelValue = shouldShowLabel ? marker.name : undefined;
           
-          // PIN ALWAYS RENDERS - key is stable to prevent remounting
-          // Only the label prop changes, which updates the label visibility
           return (
-            <AdvancedMarker
-              key={`marker-${marker._id}`}
-              position={marker.position}
-              map={mapRef.current}
-              onClick={() => handleMarkerClick(marker)}
-              color={marker.color || '#FF0000'}
-              scale={marker.isLarge ? 16 : 8}
-              label={labelValue}
-            />
+            <MarkerErrorBoundary key={`marker-${marker._id}`}>
+              <AdvancedMarker
+                position={pos}
+                map={mapRef.current}
+                onClick={() => handleMarkerClick(marker)}
+                color={marker.color || '#FF0000'}
+                scale={marker.isLarge ? 16 : 8}
+                label={labelValue}
+              />
+            </MarkerErrorBoundary>
           );
         })}
 
@@ -1965,21 +1991,31 @@ const Map: React.FC<MapProps> = ({
           />
         )}
 
-        {/* Saved routes */}
-        {savedRoutes.map((route, index) => (
-          <Polyline
-            key={`${index}-${route.color}`}
-            path={route.overviewPath}
-            options={{
-              strokeColor: selectedRoute === route && !showRouteDirections ? '#FFD700' : route.color,
-              strokeWeight: 5,
-              strokeOpacity: selectedRoute === route && !showRouteDirections ? 1 : 0.7,
-              clickable: true,
-              zIndex: selectedRoute === route && !showRouteDirections ? 1 : 0
-            }}
-            onClick={() => handleRouteClick(route, index)}
-          />
-        ))}
+        {/* Saved routes - only render Polyline when path is valid (avoids setAt/keys errors when API or data is invalid) */}
+        {savedRoutes.map((route, index) => {
+          const rawPath = route?.overviewPath;
+          const path =
+            Array.isArray(rawPath) && rawPath.length >= 2
+              ? rawPath
+                  .filter((p): p is google.maps.LatLngLiteral => p != null && typeof (p as { lat?: unknown }).lat === 'number' && typeof (p as { lng?: unknown }).lng === 'number')
+                  .map((p) => ({ lat: Number((p as { lat: number }).lat), lng: Number((p as { lng: number }).lng) }))
+              : null;
+          if (!path || path.length < 2) return null;
+          return (
+            <Polyline
+              key={`${index}-${route.color}`}
+              path={path}
+              options={{
+                strokeColor: selectedRoute === route && !showRouteDirections ? '#FFD700' : route.color,
+                strokeWeight: 5,
+                strokeOpacity: selectedRoute === route && !showRouteDirections ? 1 : 0.7,
+                clickable: true,
+                zIndex: selectedRoute === route && !showRouteDirections ? 1 : 0
+              }}
+              onClick={() => handleRouteClick(route, index)}
+            />
+          );
+        })}
 
         {/* Selected marker confirmation dialog */}
         {selectedMarker && (
